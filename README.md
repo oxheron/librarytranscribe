@@ -2,7 +2,7 @@
 
 Transcribe a FLAC library to drum MIDI: recursively scans a directory for
 .flac files, separates the drum stem with Demucs, transcribes it with a
-trained ADT model, writes .mid files into a mirrored `<root>-midi` tree, and
+trained ADT model, writes .mid files into a mirrored `<root>/midi` tree, and
 records metadata + paths in a SQLite database.
 
 The model itself is trained in the separate drumtranscribe repo; this repo

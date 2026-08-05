@@ -18,12 +18,12 @@ Build a drum-transcription database from a FLAC library.
 
 Recursively finds .flac files under a root directory, reads their metadata,
 transcribes each one to drum MIDI with a trained ADT model (+ calibrated
-per-class thresholds), writes the .mid files into a sibling directory tree
-named "<root>-midi" that mirrors the library layout, and records metadata +
-both file paths in a SQLite database.
+per-class thresholds), writes the .mid files into a "midi" subdirectory of
+the root that mirrors the library layout, and records metadata + both file
+paths in a SQLite database.
 
   /music/files/Artist/Album/01 - Song.flac
-      -> /music/files-midi/Artist/Album/01 - Song.mid
+      -> /music/files/midi/Artist/Album/01 - Song.mid
 
 Works on Linux, macOS and Windows (pure pathlib path handling, "~" is
 expanded, .FLAC/.flac both matched).
@@ -780,7 +780,7 @@ def main(argv=None):
     root = Path(args.root).expanduser().resolve()
     if not root.is_dir():
         sys.exit(f"error: not a directory: {root}")
-    midi_root = root.parent / (root.name + "-midi")
+    midi_root = root / "midi"
 
     files = sorted(p for p in root.rglob("*") if p.suffix.lower() == ".flac")
     print(f"Found {len(files)} .flac files under {root}")
