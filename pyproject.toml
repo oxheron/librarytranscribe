@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "librarytranscribe"
+dynamic = ["version"]
+description = "Transcribe a FLAC library to drum MIDI with a trained ADT model"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mutagen",
+    "torch>=2.0",
+    "numpy",
+    "scipy",
+    "librosa",
+    "soundfile",
+    "pretty_midi",
+    "demucs",
+    "conformer",
+]
+
+[project.urls]
+Repository = "https://github.com/oxheron/librarytranscribe"
+
+[project.scripts]
+librarytranscribe = "librarytranscribe:main"
+
+# Version comes from __version__ in the module, so it is bumped in one place
+# and stays in sync with the release-asset download URL baked into it.
+[tool.hatch.version]
+path = "librarytranscribe.py"
