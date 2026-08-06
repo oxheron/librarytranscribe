@@ -8,15 +8,35 @@ dynamic = ["version"]
 description = "Transcribe a FLAC library to drum MIDI with a trained ADT model"
 readme = "README.md"
 requires-python = ">=3.10"
+# On Intel macOS (darwin/x86_64) several packages stopped publishing wheels
+# but still publish sdists, so an unconstrained resolve silently builds them
+# from source (llvmlite needs a full LLVM toolchain and the local builds
+# crash). The markers below cap those packages at the last release with an
+# Intel-mac wheel; every other platform (Windows, Linux, Apple Silicon) gets
+# the latest versions. Last-wheel versions: torch/torchaudio 2.2.2 (cp312 max,
+# so use Python <= 3.12 on Intel macs), numba 0.62.1, llvmlite 0.45.1.
+#
+# demucs >= 4.1 replaced torchaudio with sphn for audio I/O (we use neither —
+# audio is read with librosa/soundfile), so torch is the only GPU-flavored
+# package on Linux/ROCm and Windows. sphn has no Intel-mac wheel, so Intel
+# macs stay on demucs 4.0.x, whose torchaudio dep installs (wheel exists) but
+# is never used, and everything runs on CPU there anyway.
 dependencies = [
     "mutagen",
-    "torch>=2.0",
-    "numpy",
+    "torch>=2.0,<2.3; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torch>=2.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    # torch 2.2.2 predates numpy 2 and crashes interoperating with it
+    "numpy<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numpy; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    # numba 0.62.1 pins llvmlite>=0.45,<0.46, so llvmlite lands on 0.45.1
+    "numba<0.63; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "scipy",
     "librosa",
     "soundfile",
     "pretty_midi",
-    "demucs",
+    "demucs>=4.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "demucs>=4.0.1,<4.1; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torchaudio<2.3; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "conformer",
 ]
 

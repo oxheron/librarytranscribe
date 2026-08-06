@@ -3,16 +3,26 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "mutagen",
-#     "torch>=2.0",
-#     "numpy",
+#     "torch>=2.0,<2.3; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+#     "torch>=2.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+#     "numpy<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+#     "numpy; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+#     "numba<0.63; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 #     "scipy",
 #     "librosa",
 #     "soundfile",
 #     "pretty_midi",
-#     "demucs",
+#     "demucs>=4.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+#     "demucs>=4.0.1,<4.1; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+#     "torchaudio<2.3; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 #     "conformer",
 # ]
 # ///
+# The environment markers keep Intel macs (the one platform recent torch,
+# numba/llvmlite and demucs/sphn wheels dropped) on the last releases that
+# still ship prebuilt wheels, so nothing is ever compiled from source; all
+# other platforms get the latest versions (see pyproject.toml for details).
+# On Intel macs use Python <= 3.12 (the last torch 2.2.2 wheel is cp312).
 """
 Build a drum-transcription database from a FLAC library.
 
@@ -99,7 +109,10 @@ HOP_LENGTH = 441
 N_FFT = 2048
 HOP_SEC = HOP_LENGTH / SR
 
-DEMUCS_MODEL = "htdemucs_ft"
+# The drums-fine-tuned member of the htdemucs_ft bag. The bag's weight
+# matrix is diagonal, so its drums stem comes entirely from this one model —
+# loading it alone gives identical drums output ~4x faster than the full bag.
+DEMUCS_MODEL = "f7e0c4bc"
 
 # (name, output GM pitch) — index order is the model's class order.
 CLASS_DEFS = [
