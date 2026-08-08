@@ -7,7 +7,7 @@ name = "librarytranscribe"
 dynamic = ["version"]
 description = "Transcribe a FLAC library to drum MIDI and build audfprint fingerprints"
 readme = "README.md"
-license-files = ["THIRD_PARTY_NOTICES.md"]
+license-files = ["LICENSE-audfprint", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.10"
 # On Intel macOS (darwin/x86_64) several packages stopped publishing wheels
 # but still publish sdists, so an unconstrained resolve silently builds them
