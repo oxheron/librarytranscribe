@@ -1,9 +1,10 @@
 # librarytranscribe
 
-Transcribe a FLAC library to drum MIDI: recursively scans a directory for
-.flac files, separates the drum stem with Demucs, transcribes it with a
-trained ADT model, writes .mid files into a mirrored `<root>/midi` tree, and
-records metadata + paths in a SQLite database.
+Transcribe a FLAC library to drum MIDI and fingerprint the original mixes:
+recursively scans a directory for .flac files, separates the drum stem with
+Demucs, transcribes it with a trained ADT model, writes .mid files into a
+mirrored `<root>/midi` tree, records metadata + paths in SQLite, and creates
+an audfprint-compatible landmark database.
 
 The model itself is trained in the separate drumtranscribe repo; this repo
 only packages the inference tool and hosts the released checkpoints.
@@ -11,7 +12,7 @@ only packages the inference tool and hosts the released checkpoints.
 ## Install and run
 
 ```sh
-pipx install https://github.com/oxheron/librarytranscribe/releases/download/v0.1.0/librarytranscribe-0.1.0-py3-none-any.whl
+pipx install https://github.com/oxheron/librarytranscribe/releases/download/v0.2.0/librarytranscribe-0.2.0-py3-none-any.whl
 librarytranscribe /music/files
 ```
 
@@ -56,11 +57,54 @@ Alternative, no install at all — just `librarytranscribe.py` and uv
 uv run librarytranscribe.py /music/files
 ```
 
+The database defaults to `drumlibrary.db` inside the scanned library
+directory. Use `-o` (or `--db`) to choose a different name; relative paths
+are also placed inside that directory.
+
+The same run also creates `audfprint.pklz` in the library root. It is updated
+incrementally, uses absolute FLAC paths as track identifiers, and uses this
+fixed profile:
+
+```text
+samplerate: 11025       density: 70        fanout: 8
+hashbits: 20            bucketsize: 100    maxtimebits: 17
+database shifts: 0      query shifts: 4
+```
+
+Use `--audfprint-db NAME.pklz` to choose another path or `--no-audfprint` to
+skip fingerprinting. `--force` rebuilds fingerprints as well as MIDI. The
+hash table occupies about 404 MiB in memory with this geometry; the `.pklz`
+file is gzip-compressed and grows as fingerprints are added. Seventeen time
+bits allow roughly 51-minute track offsets and up to 32,767 track IDs.
+
+The output is compatible with audfprint's `match` command. Query with the
+requested four sub-frame shifts:
+
+```sh
+audfprint match --dbase /music/files/audfprint.pklz --shifts 4 query.wav
+```
+
+The `audfprint` match command comes from the upstream audfprint/audfprint2
+client; it is not required to create or update the database here.
+
 Query the resulting database:
 
 ```sh
-sqlite3 drumlibrary.db "SELECT artist, album, title, n_onsets FROM tracks"
+sqlite3 /music/files/drumlibrary.db "SELECT artist, album, title, n_onsets FROM tracks"
 ```
+
+## macOS dependency handling
+
+No separate audfprint package or ffmpeg installation is needed for database
+creation: the fingerprinter is packaged with this project and reuses its
+existing NumPy/SciPy/librosa stack. This is intentional because the current
+`audfprint2` package requires NumPy 2.3+, while Torch 2.2 on Intel macOS
+requires NumPy 1.x.
+
+Both the wheel metadata and the inline `uv run` dependency list keep Intel
+macOS on the last compatible binary-wheel releases of Torch, torchaudio,
+NumPy, Numba, and Demucs. Use Python 3.10–3.12 on Intel Macs. Apple Silicon
+uses the normal current-package path and does not need Rosetta.
 
 ## Cutting a release
 

@@ -22,15 +22,19 @@
 # numba/llvmlite and demucs/sphn wheels dropped) on the last releases that
 # still ship prebuilt wheels, so nothing is ever compiled from source; all
 # other platforms get the latest versions (see pyproject.toml for details).
+# The audfprint-compatible implementation below intentionally reuses numpy,
+# scipy and librosa instead of depending on audfprint2: that package requires
+# numpy >= 2.3, which is incompatible with the Intel-mac torch wheel.
 # On Intel macs use Python <= 3.12 (the last torch 2.2.2 wheel is cp312).
 """
-Build a drum-transcription database from a FLAC library.
+Build drum-transcription and audio-fingerprint databases from a FLAC library.
 
 Recursively finds .flac files under a root directory, reads their metadata,
 transcribes each one to drum MIDI with a trained ADT model (+ calibrated
 per-class thresholds), writes the .mid files into a "midi" subdirectory of
-the root that mirrors the library layout, and records metadata + both file
-paths in a SQLite database.
+the root that mirrors the library layout, records metadata + both file paths
+in SQLite, and builds an audfprint-compatible landmark database from the
+original mixes.
 
   /music/files/Artist/Album/01 - Song.flac
       -> /music/files/midi/Artist/Album/01 - Song.mid
@@ -57,7 +61,7 @@ Pass --model best.pt to use a local checkpoint instead (calibrate.py writes
 its thresholds.json next to it).
 
 Usage:
-  librarytranscribe /music/files --db drums.db [--model runs/full/best.pt]
+  librarytranscribe /music/files -o drums.db [--model runs/full/best.pt]
 
 Metadata rules:
   - artist, title and album are REQUIRED to save a track; date, genre,
@@ -72,8 +76,9 @@ are skipped (use --force to redo them). Failures are logged into the DB and
 retried on the next run.
 
 Query examples:
-  sqlite3 drums.db "SELECT artist, album, title, n_onsets FROM tracks"
-  sqlite3 drums.db "SELECT flac_path, midi_path FROM tracks WHERE artist='X'"
+  sqlite3 /music/files/drums.db "SELECT artist, album, title, n_onsets FROM tracks"
+  sqlite3 /music/files/drums.db "SELECT flac_path, midi_path FROM tracks WHERE artist='X'"
+  audfprint match --dbase /music/files/audfprint.pklz --shifts 4 query.wav
 """
 
 from __future__ import annotations
@@ -87,7 +92,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Where the default checkpoint is fetched from when --model is not given.
 # Publishing a new model means uploading model.pt + thresholds.json to a
@@ -96,6 +101,24 @@ _RELEASE_URL = ("https://github.com/oxheron/librarytranscribe/releases/download/
                 f"v{__version__}")
 DEFAULT_MODEL_URL = f"{_RELEASE_URL}/model.pt"
 DEFAULT_THRESHOLDS_URL = f"{_RELEASE_URL}/thresholds.json"
+
+
+# =========================================================================
+# audfprint settings
+# =========================================================================
+
+# These match the requested database/query profile.  A database shift count
+# of zero means one unshifted analysis pass; query shifts are documented and
+# embedded in the database parameters for clients to discover.
+AUDFPRINT_SAMPLERATE = 11025
+AUDFPRINT_DENSITY = 70.0
+AUDFPRINT_FANOUT = 8
+AUDFPRINT_HASHBITS = 20
+AUDFPRINT_BUCKETSIZE = 100
+AUDFPRINT_MAXTIMEBITS = 17
+AUDFPRINT_DB_SHIFTS = 0
+AUDFPRINT_QUERY_SHIFTS = 4
+AUDFPRINT_DB_DEFAULT = "audfprint.pklz"
 
 
 # =========================================================================
@@ -483,6 +506,444 @@ def separate_drums(song_path: Path, device: str):
 
 
 # =========================================================================
+# audfprint-compatible landmark fingerprints
+#
+# The implementation follows Dan Ellis's audfprint landmark/hash layout and
+# pickle database fields.  It lives here instead of pulling in audfprint2,
+# whose numpy>=2.3 requirement conflicts with torch 2.2 on Intel macOS.  The
+# database can be opened by audfprint/audfprint2; its track names are the
+# absolute FLAC paths used by this tool.
+#
+# Copyright (c) 2014-2015 Dan Ellis, Columbia University, and Google.
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to
+# deal in the Software without restriction, including without limitation the
+# rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+# sell copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions: The above
+# copyright notice and this permission notice shall be included in all copies
+# or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS",
+# WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+# TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+# LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+# CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+# =========================================================================
+
+_AUDFPRINT_HT_VERSION = 20170724
+_AUDFPRINT_F1_BITS = 8
+_AUDFPRINT_DF_BITS = 6
+_AUDFPRINT_DT_BITS = 6
+_AUDFPRINT_B1_MASK = (1 << _AUDFPRINT_F1_BITS) - 1
+_AUDFPRINT_B1_SHIFT = _AUDFPRINT_DF_BITS + _AUDFPRINT_DT_BITS
+_AUDFPRINT_DF_MASK = (1 << _AUDFPRINT_DF_BITS) - 1
+_AUDFPRINT_DF_SHIFT = _AUDFPRINT_DT_BITS
+_AUDFPRINT_DT_MASK = (1 << _AUDFPRINT_DT_BITS) - 1
+
+
+def _bits_for_power_of_two(value: int) -> int:
+    if value <= 0 or value & (value - 1):
+        raise ValueError(f"value must be a positive power of two, not {value}")
+    return value.bit_length() - 1
+
+
+class _AudfprintHashTable:
+    """The audfprint pickle fields needed to build and update a database."""
+
+    def __init__(self, hashbits=AUDFPRINT_HASHBITS,
+                 depth=AUDFPRINT_BUCKETSIZE,
+                 maxtime=(1 << AUDFPRINT_MAXTIMEBITS)):
+        import numpy as np
+
+        self.hashbits = hashbits
+        self.depth = depth
+        self.maxtimebits = _bits_for_power_of_two(maxtime)
+        self.table = np.zeros((1 << hashbits, depth), dtype=np.uint32)
+        self.counts = np.zeros(1 << hashbits, dtype=np.int32)
+        self.names: list[str | None] = []
+        self.hashesperid = np.zeros(0, dtype=np.uint32)
+        self.params: dict[str, object] = {}
+        self.ht_version = _AUDFPRINT_HT_VERSION
+        self.dirty = True
+
+    def __setstate__(self, state) -> None:
+        """Accept regular and slots-style state from upstream pickles."""
+        if isinstance(state, tuple) and len(state) == 2:
+            dict_state, slot_state = state
+            if dict_state:
+                self.__dict__.update(dict_state)
+            if slot_state:
+                self.__dict__.update(slot_state)
+        else:
+            self.__dict__.update(state)
+
+    def _name_to_id(self, name: str, add_if_missing=False) -> int:
+        import numpy as np
+
+        if name not in self.names:
+            if not add_if_missing:
+                raise ValueError(f"name {name} not found")
+            try:
+                track_id = self.names.index(None)
+                self.names[track_id] = name
+                self.hashesperid[track_id] = 0
+            except ValueError:
+                track_id = len(self.names)
+                max_tracks = (1 << (32 - self.maxtimebits)) - 1
+                if track_id >= max_tracks:
+                    raise ValueError(
+                        f"audfprint database is full ({max_tracks} tracks with "
+                        f"maxtimebits={self.maxtimebits})")
+                self.names.append(name)
+                self.hashesperid = np.append(
+                    self.hashesperid, np.array([0], dtype=np.uint32))
+        return self.names.index(name)
+
+    def store(self, name: str, time_hash_pairs) -> None:
+        """Store an iterable of audfprint ``(frame, hash)`` pairs."""
+        import random
+
+        track_id = self._name_to_id(name, add_if_missing=True)
+        hashmask = (1 << self.hashbits) - 1
+        timemask = (1 << self.maxtimebits) - 1
+        id_value = (track_id + 1) << self.maxtimebits
+        n_hashes = 0
+        for time_frame, hash_value in time_hash_pairs:
+            hash_value = int(hash_value) & hashmask
+            count = int(self.counts[hash_value])
+            value = id_value + (int(time_frame) & timemask)
+            if count < self.depth:
+                self.table[hash_value, count] = value
+            else:
+                slot = random.randint(0, count)
+                if slot < self.depth:
+                    self.table[hash_value, slot] = value
+            self.counts[hash_value] = count + 1
+            n_hashes += 1
+        self.hashesperid[track_id] += n_hashes
+        self.dirty = True
+
+    def remove(self, name: str) -> None:
+        """Remove a track before replacing fingerprints for a changed file."""
+        import numpy as np
+
+        track_id = self._name_to_id(name)
+        encoded_id = track_id + 1
+        # Work in chunks: vectorizing the whole 400 MiB table would allocate
+        # another ~100 MiB boolean array, while visiting every bucket in pure
+        # Python makes replacement painfully slow for established databases.
+        chunk_rows = 4096
+        for start in range(0, len(self.counts), chunk_rows):
+            stop = min(start + chunk_rows, len(self.counts))
+            id_mask = ((self.table[start:stop] >> self.maxtimebits)
+                       == encoded_id)
+            for local_row in np.nonzero(np.any(id_mask, axis=1))[0]:
+                hash_value = start + int(local_row)
+                stored = min(self.depth, int(self.counts[hash_value]))
+                values = self.table[hash_value, :stored]
+                keep = (values >> self.maxtimebits) != encoded_id
+                remaining = values[keep]
+                self.table[hash_value, :] = 0
+                self.table[hash_value, :len(remaining)] = remaining
+                # This mirrors audfprint: after removal, previously dropped
+                # entries cannot be recovered, so the exact stored count wins.
+                self.counts[hash_value] = len(remaining)
+        self.names[track_id] = None
+        self.hashesperid[track_id] = 0
+        self.dirty = True
+
+
+class _AudfprintUnpickler:
+    """Factory for an unpickler that accepts upstream HashTable class paths."""
+
+    @staticmethod
+    def load(file_obj):
+        import pickle
+
+        class CompatibleUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                if name == "HashTable" and module in {
+                    "hash_table", "audfprint2.core.hash_table",
+                }:
+                    return _AudfprintHashTable
+                if name == "_AudfprintHashTable" and module in {
+                    "__main__", "librarytranscribe",
+                }:
+                    return _AudfprintHashTable
+                return super().find_class(module, name)
+
+        return CompatibleUnpickler(file_obj, encoding="latin1").load()
+
+
+def _audfprint_params() -> dict[str, int | float]:
+    return {
+        "samplerate": AUDFPRINT_SAMPLERATE,
+        "density": AUDFPRINT_DENSITY,
+        "fanout": AUDFPRINT_FANOUT,
+        "hashbits": AUDFPRINT_HASHBITS,
+        "bucketsize": AUDFPRINT_BUCKETSIZE,
+        "maxtimebits": AUDFPRINT_MAXTIMEBITS,
+        "db_shifts": AUDFPRINT_DB_SHIFTS,
+        "query_shifts": AUDFPRINT_QUERY_SHIFTS,
+    }
+
+
+def _open_audfprint_db(path: Path) -> _AudfprintHashTable:
+    import gzip
+
+    if not path.exists():
+        table = _AudfprintHashTable()
+        table.params.update(_audfprint_params())
+        return table
+    opener = open if path.suffix.lower() == ".pkl" else gzip.open
+    with opener(path, "rb") as file_obj:
+        loaded = _AudfprintUnpickler.load(file_obj)
+    required = ("hashbits", "depth", "maxtimebits", "table", "counts",
+                "names", "hashesperid", "params")
+    if any(not hasattr(loaded, field) for field in required):
+        raise ValueError(f"not an audfprint pickle database: {path}")
+    if isinstance(loaded, _AudfprintHashTable):
+        table = loaded
+    else:
+        # New databases use a standard-library SimpleNamespace payload so
+        # upstream audfprint can unpickle them without librarytranscribe being
+        # installed.  Turn that attribute bag back into our mutable table.
+        table = _AudfprintHashTable.__new__(_AudfprintHashTable)
+        table.__dict__.update(vars(loaded))
+    expected = (AUDFPRINT_HASHBITS, AUDFPRINT_BUCKETSIZE,
+                AUDFPRINT_MAXTIMEBITS)
+    actual = (int(table.hashbits), int(table.depth), int(table.maxtimebits))
+    if actual != expected:
+        raise ValueError(
+            f"audfprint database geometry is {actual}, expected {expected}: {path}")
+    stored_sr = table.params.get("samplerate")
+    if stored_sr is not None and int(stored_sr) != AUDFPRINT_SAMPLERATE:
+        raise ValueError(
+            f"audfprint database samplerate is {stored_sr}, expected "
+            f"{AUDFPRINT_SAMPLERATE}: {path}")
+    table.params.update(_audfprint_params())
+    table.dirty = False
+    return table
+
+
+def _save_audfprint_db(table: _AudfprintHashTable, path: Path) -> None:
+    import gzip
+    import pickle
+    from types import SimpleNamespace
+
+    if path.suffix.lower() not in {".pkl", ".pklz"}:
+        raise ValueError("audfprint database must end in .pkl or .pklz")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".part")
+    opener = open if path.suffix.lower() == ".pkl" else gzip.open
+    try:
+        with opener(temp_path, "wb") as file_obj:
+            # Both upstream implementations load a temporary object's fields
+            # into their own HashTable instance.  A SimpleNamespace supplies
+            # those fields without embedding a librarytranscribe class path.
+            payload = SimpleNamespace(**table.__dict__)
+            pickle.dump(payload, file_obj, pickle.HIGHEST_PROTOCOL)
+        temp_path.replace(path)
+        table.dirty = False
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _audfprint_locmax(vector, indices=False):
+    import numpy as np
+
+    neighbors = np.zeros(len(vector) + 1, dtype=bool)
+    neighbors[0] = True
+    neighbors[1:-1] = np.greater_equal(vector[1:], vector[:-1])
+    maxima = neighbors[:-1] & ~neighbors[1:]
+    return np.nonzero(maxima)[0] if indices else maxima
+
+
+def _audfprint_stft(signal, n_fft, hop_length, window):
+    """audfprint's reflect-padded, non-copying STFT implementation."""
+    import numpy as np
+
+    padded = np.pad(signal, n_fft // 2, mode="reflect")
+    frame_count = 1 + (len(padded) - len(window)) // hop_length
+    shape = (frame_count, len(window))
+    strides = (padded.strides[0] * hop_length, padded.strides[0])
+    frames = np.lib.stride_tricks.as_strided(
+        padded, shape=shape, strides=strides)
+    return np.fft.rfft(frames * window, n_fft).transpose()
+
+
+class _AudfprintAnalyzer:
+    """Convert mono 11.025 kHz audio arrays to audfprint hashes."""
+
+    def __init__(self):
+        import numpy as np
+
+        self.density = AUDFPRINT_DENSITY
+        self.n_fft = 512
+        self.n_hop = 256
+        self.f_sd = 30.0
+        self.maxpksperframe = 5
+        self.maxpairsperpeak = AUDFPRINT_FANOUT
+        self.targetdf = 31
+        self.mindt = 2
+        self.targetdt = 63
+        self._spread_width = None
+        self._spread_len = None
+        self._spread_values = np.array([])
+
+    def _spread_peaks(self, peaks, npoints=None, width=4.0, base=None):
+        import numpy as np
+
+        if base is None:
+            if npoints is None:
+                raise ValueError("npoints is required without a base vector")
+            vector = np.zeros(npoints)
+        else:
+            npoints = len(base)
+            vector = np.copy(base)
+        if width != self._spread_width or npoints != self._spread_len:
+            self._spread_width = width
+            self._spread_len = npoints
+            self._spread_values = np.exp(
+                -0.5 * (np.arange(-npoints, npoints + 1) / width) ** 2)
+        for position, value in peaks:
+            indexes = np.arange(npoints) + npoints - position
+            vector = np.maximum(vector, value * self._spread_values[indexes])
+        return vector
+
+    def _spread_vector_peaks(self, vector, width=4.0):
+        peaks = _audfprint_locmax(vector, indices=True)
+        return self._spread_peaks(
+            zip(peaks, vector[peaks]), npoints=len(vector), width=width)
+
+    def _forward_prune(self, spectrogram, decay):
+        import numpy as np
+
+        _rows, columns = np.shape(spectrogram)
+        threshold = self._spread_vector_peaks(
+            np.max(spectrogram[:, :min(10, columns)], axis=1), self.f_sd)
+        peaks = np.zeros(np.shape(spectrogram), dtype=bool)
+        spread_points = len(threshold)
+        spread_values = self._spread_values
+        for column in range(columns):
+            values = spectrogram[:, column]
+            candidates = np.nonzero(
+                _audfprint_locmax(values) & (values > threshold))[0]
+            ranked = sorted(zip(values[candidates], candidates), reverse=True)
+            for value, position in ranked[:self.maxpksperframe]:
+                threshold = np.maximum(
+                    threshold,
+                    value * spread_values[
+                        spread_points - position:2 * spread_points - position],
+                )
+                peaks[position, column] = True
+            threshold *= decay
+        return peaks
+
+    def _backward_prune(self, spectrogram, peaks, decay):
+        import numpy as np
+
+        columns = np.shape(spectrogram)[1]
+        threshold = self._spread_vector_peaks(spectrogram[:, -1], self.f_sd)
+        for column in range(columns, 0, -1):
+            candidates = np.nonzero(peaks[:, column - 1])[0]
+            values = spectrogram[candidates, column - 1]
+            for value, position in sorted(
+                    zip(values, candidates), reverse=True):
+                if value >= threshold[position]:
+                    threshold = self._spread_peaks(
+                        [(position, value)], base=threshold, width=self.f_sd)
+                    if column < columns:
+                        peaks[position, column] = False
+                else:
+                    peaks[position, column - 1] = False
+            threshold *= decay
+        return peaks
+
+    def _find_peaks(self, audio):
+        import numpy as np
+        from scipy.signal import lfilter
+
+        if len(audio) == 0:
+            return []
+        decay = 1 - 0.01 * (
+            self.density * np.sqrt(self.n_hop / 352.8) / 35)
+        window = np.hanning(self.n_fft + 2)[1:-1]
+        spectrogram = np.abs(_audfprint_stft(
+            audio, self.n_fft, self.n_hop, window))
+        maximum = np.max(spectrogram)
+        if maximum > 0:
+            spectrogram = np.log(np.maximum(spectrogram, maximum / 1e6))
+            spectrogram -= np.mean(spectrogram)
+        spectrogram = np.array([
+            lfilter([1, -1], [1, -0.98], row) for row in spectrogram
+        ])[:-1, :]
+        peaks = self._forward_prune(spectrogram, decay)
+        peaks = self._backward_prune(spectrogram, peaks, decay)
+        result = []
+        for column in range(np.shape(spectrogram)[1]):
+            result.extend(
+                (column, int(bin_)) for bin_ in np.nonzero(peaks[:, column])[0])
+        return result
+
+    def _peaks_to_landmarks(self, peaks):
+        if not peaks:
+            return []
+        columns = peaks[-1][0] + 1
+        peaks_at = [[] for _ in range(columns)]
+        for column, bin_ in peaks:
+            peaks_at[column].append(bin_)
+        landmarks = []
+        for column in range(columns):
+            for peak in peaks_at[column]:
+                pairs = 0
+                for later in range(
+                        column + self.mindt,
+                        min(columns, column + self.targetdt)):
+                    if pairs >= self.maxpairsperpeak:
+                        break
+                    for later_peak in peaks_at[later]:
+                        if (abs(later_peak - peak) < self.targetdf and
+                                pairs < self.maxpairsperpeak):
+                            landmarks.append(
+                                (column, peak, later_peak, later - column))
+                            pairs += 1
+        return landmarks
+
+    def hashes(self, audio):
+        import numpy as np
+
+        landmarks = np.asarray(self._peaks_to_landmarks(
+            self._find_peaks(audio)), dtype=np.int32)
+        if not len(landmarks):
+            return np.zeros((0, 2), dtype=np.int32)
+        hashes = np.zeros((len(landmarks), 2), dtype=np.int32)
+        hashes[:, 0] = landmarks[:, 0]
+        hashes[:, 1] = (
+            ((landmarks[:, 1] & _AUDFPRINT_B1_MASK) << _AUDFPRINT_B1_SHIFT)
+            | (((landmarks[:, 2] - landmarks[:, 1]) & _AUDFPRINT_DF_MASK)
+               << _AUDFPRINT_DF_SHIFT)
+            | (landmarks[:, 3] & _AUDFPRINT_DT_MASK)
+        )
+        packed = ((hashes[:, 0].astype(np.uint64) << 32)
+                  | hashes[:, 1].astype(np.uint32))
+        unique = np.sort(np.unique(packed))
+        return np.column_stack((unique >> 32, unique & 0xFFFFFFFF)).astype(
+            np.int32)
+
+
+def _fingerprint_file(path: Path, analyzer: _AudfprintAnalyzer):
+    import librosa
+    import numpy as np
+
+    audio, _ = librosa.load(
+        str(path), sr=AUDFPRINT_SAMPLERATE, mono=True, dtype=np.float32)
+    return analyzer.hashes(audio)
+
+
+# =========================================================================
 # FLAC metadata
 # =========================================================================
 
@@ -624,6 +1085,18 @@ CREATE TABLE IF NOT EXISTS failures (
     reason TEXT,
     at     TEXT
 );
+CREATE TABLE IF NOT EXISTS fingerprints (
+    flac_path       TEXT PRIMARY KEY,
+    file_size       INTEGER NOT NULL,
+    file_mtime      REAL NOT NULL,
+    n_hashes        INTEGER NOT NULL,
+    fingerprinted_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fingerprint_failures (
+    path   TEXT PRIMARY KEY,
+    reason TEXT,
+    at     TEXT
+);
 """
 
 
@@ -685,6 +1158,104 @@ def record_failure(con, path: Path, reason: str):
         (str(path), reason, time.strftime("%Y-%m-%dT%H:%M:%S")),
     )
     con.commit()
+
+
+def fingerprint_already_done(con: sqlite3.Connection, path: Path,
+                             known_names: set[str]) -> bool:
+    row = con.execute(
+        "SELECT file_size, file_mtime FROM fingerprints WHERE flac_path = ?",
+        (str(path),),
+    ).fetchone()
+    if not row or str(path) not in known_names:
+        return False
+    stat = path.stat()
+    return row[0] == stat.st_size and abs(row[1] - stat.st_mtime) < 1e-6
+
+
+def _save_fingerprint_records(con: sqlite3.Connection, records) -> None:
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    con.executemany(
+        """INSERT INTO fingerprints
+               (flac_path, file_size, file_mtime, n_hashes, fingerprinted_at)
+           VALUES (?,?,?,?,?)
+           ON CONFLICT(flac_path) DO UPDATE SET
+               file_size=excluded.file_size,
+               file_mtime=excluded.file_mtime,
+               n_hashes=excluded.n_hashes,
+               fingerprinted_at=excluded.fingerprinted_at""",
+        [(str(path), stat.st_size, stat.st_mtime, n_hashes, now)
+         for path, stat, n_hashes in records],
+    )
+    con.executemany(
+        "DELETE FROM fingerprint_failures WHERE path = ?",
+        [(str(path),) for path, _stat, _n_hashes in records],
+    )
+    con.commit()
+
+
+def _record_fingerprint_failure(con: sqlite3.Connection, path: Path,
+                                reason: str) -> None:
+    con.execute(
+        "INSERT INTO fingerprint_failures (path, reason, at) VALUES (?,?,?) "
+        "ON CONFLICT(path) DO UPDATE SET reason=excluded.reason, at=excluded.at",
+        (str(path), reason, time.strftime("%Y-%m-%dT%H:%M:%S")),
+    )
+    con.commit()
+
+
+def build_fingerprint_database(con: sqlite3.Connection, files: list[Path],
+                               db_path: Path, force=False):
+    """Incrementally fingerprint files and atomically update the pickle DB."""
+    try:
+        table = _open_audfprint_db(db_path)
+    except Exception as exc:
+        sys.exit(f"error: could not open audfprint database {db_path}: {exc}")
+
+    known_names = {name for name in table.names if name is not None}
+    analyzer = _AudfprintAnalyzer()
+    records = []
+    n_done = n_skip = n_fail = 0
+    interrupted = False
+
+    for index, path in enumerate(files, 1):
+        name = str(path)
+        if not force and fingerprint_already_done(con, path, known_names):
+            n_skip += 1
+            continue
+        print(f"[fingerprint {index}/{len(files)}] {path.name}")
+        try:
+            hashes = _fingerprint_file(path, analyzer)
+            # Analyze first so a read/analysis failure leaves any older entry
+            # intact.  Replacing only after success avoids duplicate hashes.
+            if name in known_names:
+                table.remove(name)
+                known_names.remove(name)
+            pairs = [(int(row[0]), int(row[1])) for row in hashes]
+            table.store(name, pairs)
+            known_names.add(name)
+            records.append((path, path.stat(), len(pairs)))
+            n_done += 1
+            print(f"  {len(pairs)} hashes")
+        except KeyboardInterrupt:
+            print("\nInterrupted -- saving fingerprint progress so far.")
+            interrupted = True
+            break
+        except Exception as exc:
+            print(f"  FINGERPRINT FAILED: {exc}")
+            _record_fingerprint_failure(con, path, str(exc))
+            n_fail += 1
+
+    if table.dirty:
+        print(f"Saving audfprint database: {db_path}")
+        try:
+            _save_audfprint_db(table, db_path)
+        except Exception as exc:
+            sys.exit(f"error: could not save audfprint database {db_path}: {exc}")
+        # Commit the incremental index only after the fingerprint database is
+        # safely in place.  A crash can therefore cause re-analysis, not loss.
+        _save_fingerprint_records(con, records)
+
+    return n_done, n_skip, n_fail, interrupted
 
 
 # =========================================================================
@@ -771,18 +1342,25 @@ def load_thresholds(model_path: str, thresholds_path: str | None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Transcribe a FLAC library to drum MIDI (into <root>-midi) "
-                    "and build a SQLite database of metadata + paths.",
+        description="Transcribe a FLAC library to drum MIDI (into <root>/midi) "
+                    "and build SQLite + audfprint databases.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("root", help="Directory to scan recursively for .flac files")
-    parser.add_argument("--db", default="drumlibrary.db", help="SQLite database path")
+    parser.add_argument("-o", "--output", "--db", dest="db",
+                        default="drumlibrary.db",
+                        help="SQLite database name/path (relative paths go under root)")
     parser.add_argument("--model", default=None,
                         help="Model checkpoint (.pt); default: download the "
                              "release model into the user cache on first use")
     parser.add_argument("--thresholds", default=None,
                         help="thresholds.json (default: next to the model checkpoint)")
+    parser.add_argument("--audfprint-db", "--fingerprint-db",
+                        dest="fingerprint_db", default=AUDFPRINT_DB_DEFAULT,
+                        help="audfprint .pklz database (relative paths go under root)")
+    parser.add_argument("--no-audfprint", action="store_true",
+                        help="Skip audfprint database creation/update")
     parser.add_argument("--force", action="store_true",
-                        help="Re-transcribe files already in the database")
+                        help="Re-transcribe and re-fingerprint unchanged files")
     parser.add_argument("--no-stream-vote", action="store_true",
                         help="Disable stream-consistency voting (on by default)")
     parser.add_argument("--limit", type=int, default=None,
@@ -794,14 +1372,33 @@ def main(argv=None):
     if not root.is_dir():
         sys.exit(f"error: not a directory: {root}")
     midi_root = root / "midi"
+    db_path = Path(args.db).expanduser()
+    if not db_path.is_absolute():
+        db_path = root / db_path
+    db_path = db_path.resolve()
+    fingerprint_db_path = Path(args.fingerprint_db).expanduser()
+    if not fingerprint_db_path.is_absolute():
+        fingerprint_db_path = root / fingerprint_db_path
+    fingerprint_db_path = fingerprint_db_path.resolve()
+    if (not args.no_audfprint and
+            fingerprint_db_path.suffix.lower() not in {".pkl", ".pklz"}):
+        sys.exit("error: audfprint database must end in .pkl or .pklz")
+    if not args.no_audfprint and fingerprint_db_path == db_path:
+        sys.exit("error: SQLite and audfprint databases must use different paths")
 
     files = sorted(p for p in root.rglob("*") if p.suffix.lower() == ".flac")
     print(f"Found {len(files)} .flac files under {root}")
     print(f"MIDI output tree: {midi_root}")
+    print(f"Database: {db_path}")
+    if not args.no_audfprint:
+        print(f"audfprint database: {fingerprint_db_path}")
+        print("audfprint settings: samplerate=11025 density=70 fanout=8 "
+              "hashbits=20 bucketsize=100 maxtimebits=17 "
+              "DB shifts=0 query shifts=4")
     if args.limit:
         files = files[: args.limit]
 
-    con = open_db(Path(args.db).expanduser())
+    con = open_db(db_path)
 
     # ---- metadata pass -------------------------------------------------
     ready: list[tuple[Path, TrackMeta]] = []
@@ -825,6 +1422,24 @@ def main(argv=None):
 
     print(f"{len(ready)} tracks with sufficient metadata, "
           f"{n_skipped_meta} skipped/unreadable")
+
+    # Fingerprints use the original mixes and do not require music metadata,
+    # so every discovered/readable-by-librosa FLAC is included even if it was
+    # not eligible for drum transcription.
+    fp_done = fp_skip = fp_fail = 0
+    if not args.no_audfprint:
+        fp_done, fp_skip, fp_fail, interrupted = build_fingerprint_database(
+            con, files, fingerprint_db_path, force=args.force)
+        print(f"Fingerprints: {fp_done} added/updated, {fp_skip} already up to "
+              f"date, {fp_fail} failed. DB: {fingerprint_db_path}")
+        if interrupted:
+            con.close()
+            return
+
+    if not ready:
+        print(f"\nDone: no tracks eligible for MIDI transcription. DB: {db_path}")
+        con.close()
+        return
 
     # ---- model setup ---------------------------------------------------
     import torch
@@ -867,7 +1482,11 @@ def main(argv=None):
         n_done += 1
 
     print(f"\nDone: {n_done} transcribed, {n_skip} already up to date, "
-          f"{n_fail} failed, {n_skipped_meta} skipped on metadata. DB: {args.db}")
+          f"{n_fail} failed, {n_skipped_meta} skipped on metadata. DB: {db_path}")
+    if not args.no_audfprint:
+        print(f"audfprint: {fp_done} added/updated, {fp_skip} already up to date, "
+              f"{fp_fail} failed. DB: {fingerprint_db_path}")
+    con.close()
 
 
 if __name__ == "__main__":

@@ -5,8 +5,9 @@ build-backend = "hatchling.build"
 [project]
 name = "librarytranscribe"
 dynamic = ["version"]
-description = "Transcribe a FLAC library to drum MIDI with a trained ADT model"
+description = "Transcribe a FLAC library to drum MIDI and build audfprint fingerprints"
 readme = "README.md"
+license-files = ["THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.10"
 # On Intel macOS (darwin/x86_64) several packages stopped publishing wheels
 # but still publish sdists, so an unconstrained resolve silently builds them
@@ -21,6 +22,10 @@ requires-python = ">=3.10"
 # package on Linux/ROCm and Windows. sphn has no Intel-mac wheel, so Intel
 # macs stay on demucs 4.0.x, whose torchaudio dep installs (wheel exists) but
 # is never used, and everything runs on CPU there anyway.
+#
+# audfprint support is implemented in librarytranscribe.py and deliberately
+# reuses numpy/scipy/librosa. Do not add audfprint2 as a dependency: its
+# numpy>=2.3 requirement cannot coexist with the Intel-mac torch 2.2 wheel.
 dependencies = [
     "mutagen",
     "torch>=2.0,<2.3; sys_platform == 'darwin' and platform_machine == 'x86_64'",
