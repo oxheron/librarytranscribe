@@ -114,7 +114,7 @@ AUDFPRINT_SAMPLERATE = 11025
 AUDFPRINT_DENSITY = 70.0
 AUDFPRINT_FANOUT = 8
 AUDFPRINT_HASHBITS = 20
-AUDFPRINT_BUCKETSIZE = 100
+AUDFPRINT_BUCKETSIZE = 256
 AUDFPRINT_MAXTIMEBITS = 17
 AUDFPRINT_DB_SHIFTS = 0
 AUDFPRINT_QUERY_SHIFTS = 4
@@ -1400,9 +1400,12 @@ def main(argv=None):
     print(f"Database: {db_path}")
     if not args.no_audfprint:
         print(f"audfprint database: {fingerprint_db_path}")
-        print("audfprint settings: samplerate=11025 density=70 fanout=8 "
-              "hashbits=20 bucketsize=100 maxtimebits=17 "
-              "DB shifts=0 query shifts=4")
+        print(f"audfprint settings: samplerate={AUDFPRINT_SAMPLERATE} "
+              f"density={AUDFPRINT_DENSITY:g} fanout={AUDFPRINT_FANOUT} "
+              f"hashbits={AUDFPRINT_HASHBITS} bucketsize={AUDFPRINT_BUCKETSIZE} "
+              f"maxtimebits={AUDFPRINT_MAXTIMEBITS} "
+              f"DB shifts={AUDFPRINT_DB_SHIFTS} "
+              f"query shifts={AUDFPRINT_QUERY_SHIFTS}")
     if args.limit:
         files = files[: args.limit]
 

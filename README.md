@@ -72,13 +72,13 @@ fixed profile:
 
 ```text
 samplerate: 11025       density: 70        fanout: 8
-hashbits: 20            bucketsize: 100    maxtimebits: 17
+hashbits: 20            bucketsize: 256    maxtimebits: 17
 database shifts: 0      query shifts: 4
 ```
 
 Use `--audfprint-db NAME.pklz` to choose another path or `--no-audfprint` to
 skip fingerprinting. `--force` rebuilds fingerprints as well as MIDI. The
-hash table occupies about 404 MiB in memory with this geometry; the `.pklz`
+hash table occupies about 1 GiB in memory with this geometry; the `.pklz`
 file is gzip-compressed and grows as fingerprints are added. Seventeen time
 bits allow roughly 51-minute track offsets and up to 32,767 track IDs.
 
