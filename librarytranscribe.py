@@ -1357,6 +1357,8 @@ def main(argv=None):
     parser.add_argument("--audfprint-db", "--fingerprint-db",
                         dest="fingerprint_db", default=AUDFPRINT_DB_DEFAULT,
                         help="audfprint .pklz database (relative paths go under root)")
+    parser.add_argument("--midi-dir", default=None,
+                        help="MIDI output tree root (default: <root>/midi)")
     parser.add_argument("--no-audfprint", action="store_true",
                         help="Skip audfprint database creation/update")
     parser.add_argument("--force", action="store_true",
@@ -1371,7 +1373,8 @@ def main(argv=None):
     root = Path(args.root).expanduser().resolve()
     if not root.is_dir():
         sys.exit(f"error: not a directory: {root}")
-    midi_root = root / "midi"
+    midi_root = (Path(args.midi_dir).expanduser().resolve() if args.midi_dir
+                 else root / "midi")
     db_path = Path(args.db).expanduser()
     if not db_path.is_absolute():
         db_path = root / db_path
@@ -1385,6 +1388,11 @@ def main(argv=None):
         sys.exit("error: audfprint database must end in .pkl or .pklz")
     if not args.no_audfprint and fingerprint_db_path == db_path:
         sys.exit("error: SQLite and audfprint databases must use different paths")
+    # The MIDI writer creates its tree as it goes, but sqlite3.connect fails
+    # if the database's directory does not exist yet (e.g. redirected output).
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not args.no_audfprint:
+        fingerprint_db_path.parent.mkdir(parents=True, exist_ok=True)
 
     files = sorted(p for p in root.rglob("*") if p.suffix.lower() == ".flac")
     print(f"Found {len(files)} .flac files under {root}")

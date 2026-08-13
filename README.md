@@ -61,6 +61,11 @@ The database defaults to `drumlibrary.db` inside the scanned library
 directory. Use `-o` (or `--db`) to choose a different name; relative paths
 are also placed inside that directory.
 
+The MIDI tree defaults to `<root>/midi`. Use `--midi-dir` to write it
+somewhere else (e.g. a local disk when the library lives on a slow network
+mount; `-o` and `--audfprint-db` accept absolute paths for the same
+reason).
+
 The same run also creates `audfprint.pklz` in the library root. It is updated
 incrementally, uses absolute FLAC paths as track identifiers, and uses this
 fixed profile:
