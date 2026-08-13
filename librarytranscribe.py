@@ -119,6 +119,10 @@ AUDFPRINT_MAXTIMEBITS = 17
 AUDFPRINT_DB_SHIFTS = 0
 AUDFPRINT_QUERY_SHIFTS = 4
 AUDFPRINT_DB_DEFAULT = "audfprint.pklz"
+# Save the pickle DB (and commit its index rows) after this many new
+# fingerprints, so a hard kill mid-pass loses at most one checkpoint's work
+# instead of the whole pass.
+AUDFPRINT_CHECKPOINT_EVERY = 500
 
 
 # =========================================================================
@@ -1236,6 +1240,18 @@ def build_fingerprint_database(con: sqlite3.Connection, files: list[Path],
             records.append((path, path.stat(), len(pairs)))
             n_done += 1
             print(f"  {len(pairs)} hashes")
+            if n_done % AUDFPRINT_CHECKPOINT_EVERY == 0:
+                print(f"Checkpoint: saving audfprint database "
+                      f"({n_done} new fingerprints): {db_path}")
+                try:
+                    _save_audfprint_db(table, db_path)
+                except Exception as exc:
+                    sys.exit(f"error: could not save audfprint database "
+                             f"{db_path}: {exc}")
+                # As with the final save: index rows commit only once the
+                # fingerprint database holding them is safely in place.
+                _save_fingerprint_records(con, records)
+                records.clear()
         except KeyboardInterrupt:
             print("\nInterrupted -- saving fingerprint progress so far.")
             interrupted = True

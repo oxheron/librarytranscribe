@@ -78,6 +78,8 @@ database shifts: 0      query shifts: 4
 
 Use `--audfprint-db NAME.pklz` to choose another path or `--no-audfprint` to
 skip fingerprinting. `--force` rebuilds fingerprints as well as MIDI. The
+database is saved every 500 new fingerprints and at the end of the pass, so
+an interrupted run loses at most the work since the last checkpoint. The
 hash table occupies about 1 GiB in memory with this geometry; the `.pklz`
 file is gzip-compressed and grows as fingerprints are added. Seventeen time
 bits allow roughly 51-minute track offsets and up to 32,767 track IDs.
