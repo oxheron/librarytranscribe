@@ -61,19 +61,26 @@ The database defaults to `drumlibrary.db` inside the scanned library
 directory. Use `-o` (or `--db`) to choose a different name; relative paths
 are also placed inside that directory.
 
+The MIDI tree defaults to `<root>/midi`. Use `--midi-dir` to write it
+somewhere else (e.g. a local disk when the library lives on a slow network
+mount; `-o` and `--audfprint-db` accept absolute paths for the same
+reason).
+
 The same run also creates `audfprint.pklz` in the library root. It is updated
 incrementally, uses absolute FLAC paths as track identifiers, and uses this
 fixed profile:
 
 ```text
 samplerate: 11025       density: 70        fanout: 8
-hashbits: 20            bucketsize: 100    maxtimebits: 17
+hashbits: 20            bucketsize: 256    maxtimebits: 17
 database shifts: 0      query shifts: 4
 ```
 
 Use `--audfprint-db NAME.pklz` to choose another path or `--no-audfprint` to
 skip fingerprinting. `--force` rebuilds fingerprints as well as MIDI. The
-hash table occupies about 404 MiB in memory with this geometry; the `.pklz`
+database is saved every 500 new fingerprints and at the end of the pass, so
+an interrupted run loses at most the work since the last checkpoint. The
+hash table occupies about 1 GiB in memory with this geometry; the `.pklz`
 file is gzip-compressed and grows as fingerprints are added. Seventeen time
 bits allow roughly 51-minute track offsets and up to 32,767 track IDs.
 

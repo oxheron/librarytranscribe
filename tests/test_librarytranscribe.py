@@ -22,7 +22,7 @@ class CoreTests(unittest.TestCase):
                 "density": 70.0,
                 "fanout": 8,
                 "hashbits": 20,
-                "bucketsize": 100,
+                "bucketsize": 256,
                 "maxtimebits": 17,
                 "db_shifts": 0,
                 "query_shifts": 4,

@@ -114,11 +114,15 @@ AUDFPRINT_SAMPLERATE = 11025
 AUDFPRINT_DENSITY = 70.0
 AUDFPRINT_FANOUT = 8
 AUDFPRINT_HASHBITS = 20
-AUDFPRINT_BUCKETSIZE = 100
+AUDFPRINT_BUCKETSIZE = 256
 AUDFPRINT_MAXTIMEBITS = 17
 AUDFPRINT_DB_SHIFTS = 0
 AUDFPRINT_QUERY_SHIFTS = 4
 AUDFPRINT_DB_DEFAULT = "audfprint.pklz"
+# Save the pickle DB (and commit its index rows) after this many new
+# fingerprints, so a hard kill mid-pass loses at most one checkpoint's work
+# instead of the whole pass.
+AUDFPRINT_CHECKPOINT_EVERY = 500
 
 
 # =========================================================================
@@ -1236,6 +1240,18 @@ def build_fingerprint_database(con: sqlite3.Connection, files: list[Path],
             records.append((path, path.stat(), len(pairs)))
             n_done += 1
             print(f"  {len(pairs)} hashes")
+            if n_done % AUDFPRINT_CHECKPOINT_EVERY == 0:
+                print(f"Checkpoint: saving audfprint database "
+                      f"({n_done} new fingerprints): {db_path}")
+                try:
+                    _save_audfprint_db(table, db_path)
+                except Exception as exc:
+                    sys.exit(f"error: could not save audfprint database "
+                             f"{db_path}: {exc}")
+                # As with the final save: index rows commit only once the
+                # fingerprint database holding them is safely in place.
+                _save_fingerprint_records(con, records)
+                records.clear()
         except KeyboardInterrupt:
             print("\nInterrupted -- saving fingerprint progress so far.")
             interrupted = True
@@ -1357,6 +1373,8 @@ def main(argv=None):
     parser.add_argument("--audfprint-db", "--fingerprint-db",
                         dest="fingerprint_db", default=AUDFPRINT_DB_DEFAULT,
                         help="audfprint .pklz database (relative paths go under root)")
+    parser.add_argument("--midi-dir", default=None,
+                        help="MIDI output tree root (default: <root>/midi)")
     parser.add_argument("--no-audfprint", action="store_true",
                         help="Skip audfprint database creation/update")
     parser.add_argument("--force", action="store_true",
@@ -1371,7 +1389,8 @@ def main(argv=None):
     root = Path(args.root).expanduser().resolve()
     if not root.is_dir():
         sys.exit(f"error: not a directory: {root}")
-    midi_root = root / "midi"
+    midi_root = (Path(args.midi_dir).expanduser().resolve() if args.midi_dir
+                 else root / "midi")
     db_path = Path(args.db).expanduser()
     if not db_path.is_absolute():
         db_path = root / db_path
@@ -1385,6 +1404,11 @@ def main(argv=None):
         sys.exit("error: audfprint database must end in .pkl or .pklz")
     if not args.no_audfprint and fingerprint_db_path == db_path:
         sys.exit("error: SQLite and audfprint databases must use different paths")
+    # The MIDI writer creates its tree as it goes, but sqlite3.connect fails
+    # if the database's directory does not exist yet (e.g. redirected output).
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not args.no_audfprint:
+        fingerprint_db_path.parent.mkdir(parents=True, exist_ok=True)
 
     files = sorted(p for p in root.rglob("*") if p.suffix.lower() == ".flac")
     print(f"Found {len(files)} .flac files under {root}")
@@ -1392,9 +1416,12 @@ def main(argv=None):
     print(f"Database: {db_path}")
     if not args.no_audfprint:
         print(f"audfprint database: {fingerprint_db_path}")
-        print("audfprint settings: samplerate=11025 density=70 fanout=8 "
-              "hashbits=20 bucketsize=100 maxtimebits=17 "
-              "DB shifts=0 query shifts=4")
+        print(f"audfprint settings: samplerate={AUDFPRINT_SAMPLERATE} "
+              f"density={AUDFPRINT_DENSITY:g} fanout={AUDFPRINT_FANOUT} "
+              f"hashbits={AUDFPRINT_HASHBITS} bucketsize={AUDFPRINT_BUCKETSIZE} "
+              f"maxtimebits={AUDFPRINT_MAXTIMEBITS} "
+              f"DB shifts={AUDFPRINT_DB_SHIFTS} "
+              f"query shifts={AUDFPRINT_QUERY_SHIFTS}")
     if args.limit:
         files = files[: args.limit]
 
