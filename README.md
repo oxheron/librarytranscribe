@@ -12,7 +12,7 @@ only packages the inference tool and hosts the released checkpoints.
 ## Install and run
 
 ```sh
-pipx install https://github.com/oxheron/librarytranscribe/releases/download/v0.2.0/librarytranscribe-0.2.0-py3-none-any.whl
+pipx install https://github.com/oxheron/librarytranscribe/releases/download/v0.3.0/librarytranscribe-0.3.0-py3-none-any.whl
 librarytranscribe /music/files
 ```
 
@@ -116,7 +116,12 @@ uses the normal current-package path and does not need Rosetta.
 ## Cutting a release
 
 1. Bump `__version__` in `librarytranscribe.py` (this sets both the package
-   version and the release-asset URL the tool downloads from).
+   version and the release-asset URL the tool downloads from), update the
+   install URL above, and run the test suite:
+
+   ```sh
+   python -m unittest discover -s tests -v
+   ```
 
 2. Strip the training checkpoint down to inference weights (the source
    checkpoint comes from the drumtranscribe checkout):

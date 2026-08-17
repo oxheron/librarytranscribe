@@ -92,7 +92,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Where the default checkpoint is fetched from when --model is not given.
 # Publishing a new model means uploading model.pt + thresholds.json to a
